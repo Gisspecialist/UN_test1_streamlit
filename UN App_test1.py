@@ -23,7 +23,7 @@ UNSD_V1_BASE = "https://unstats.un.org/SDGAPI"
 UNSD_V1_API = f"{UNSD_V1_BASE}/v1/sdg"
 
 # -----------------------------
-# ✅ STREAMLIT CLOUD SAFE WRITABLE DIRS (PATCH)
+# ✅ STREAMLIT CLOUD SAFE WRITABLE DIRS
 # -----------------------------
 RUNTIME_DIR = Path(tempfile.gettempdir()) / "un_sdg_dashboard"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,7 +117,6 @@ def cache_read(key: str) -> pd.DataFrame | None:
 
 def cache_write(key: str, df: pd.DataFrame, meta: dict):
     p_parq, p_csv, p_meta = cache_paths(key)
-    # Prefer parquet; always write CSV + meta
     try:
         df.to_parquet(p_parq, index=False)
     except Exception:
@@ -174,7 +173,6 @@ def try_get_first_json(paths: list[tuple[str, dict | None]]):
     raise last_err if last_err else RuntimeError("No endpoints succeeded.")
 
 def json_to_df(rows) -> pd.DataFrame:
-    # Flatten nested objects so filters/nunique won't crash
     return pd.json_normalize(rows, sep=".")
 
 # -----------------------------
@@ -388,16 +386,19 @@ def compute_kpis(df: pd.DataFrame, year_col: str, value_col: str, group_col: str
 # UI
 # -----------------------------
 st.title("UN Office for Partnerships — SDG Data Explorer + Finance Dashboard")
-st.caption("Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, render 10 chart types, and cache datasets safely on Streamlit Cloud.")
+st.caption(
+    "Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, render 10 chart types, "
+    "and cache datasets safely on Streamlit Cloud."
+)
 
-mode = st.sidebar.radio("Mode", ["Browse SDG Catalog", "Quick Indicator Fetch", "Upload CSV/XLSX"], index=0)
+mode = st.sidebar.radio("Mode", ["Browse SDG Catalog", "Quick Indicator Fetch", "Upload CSV/XLSX"], index=0, key="mode")
 
 # Disk cache controls
 st.sidebar.subheader("Performance")
-disk_cache = st.sidebar.toggle("Enable disk cache (Parquet/CSV)", value=True)
+disk_cache = st.sidebar.toggle("Enable disk cache (Parquet/CSV)", value=True, key="disk_cache")
 
 with st.sidebar.expander("Cache utilities"):
-    if st.button("Clear disk cache"):
+    if st.button("Clear disk cache", key="clear_cache_btn"):
         clear_cache()
         st.success("Cache cleared.")
     items = list_cache_items(limit=15)
@@ -428,7 +429,7 @@ if mode == "Browse SDG Catalog":
         st.stop()
 
     goals["_label"] = goals[goal_code].astype(str) + (" — " + goals[goal_title].astype(str) if goal_title else "")
-    goal_choice = st.sidebar.selectbox("Goal", goals["_label"].tolist(), index=0)
+    goal_choice = st.sidebar.selectbox("Goal", goals["_label"].tolist(), index=0, key="goal_choice")
     chosen_goal_code = goal_choice.split(" — ")[0].strip()
 
     with st.spinner("Loading Targets..."):
@@ -442,7 +443,7 @@ if mode == "Browse SDG Catalog":
         st.stop()
 
     targets["_label"] = targets[target_code].astype(str) + (" — " + targets[target_title].astype(str) if target_title else "")
-    target_choice = st.sidebar.selectbox("Target", targets["_label"].tolist(), index=0)
+    target_choice = st.sidebar.selectbox("Target", targets["_label"].tolist(), index=0, key="target_choice")
     chosen_target_code = target_choice.split(" — ")[0].strip()
 
     with st.spinner("Loading Indicators..."):
@@ -456,7 +457,7 @@ if mode == "Browse SDG Catalog":
         st.stop()
 
     inds["_label"] = inds[ind_code].astype(str) + (" — " + inds[ind_desc].astype(str) if ind_desc else "")
-    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0)
+    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="ind_choice")
     chosen_ind_code = ind_choice.split(" — ")[0].strip()
 
     with st.spinner("Loading Series..."):
@@ -471,7 +472,7 @@ if mode == "Browse SDG Catalog":
         series_label = ""
     else:
         series["_label"] = series[series_code].astype(str) + (" — " + series[series_desc].astype(str) if series_desc else "")
-        s_choice = st.sidebar.selectbox("Series", series["_label"].tolist(), index=0)
+        s_choice = st.sidebar.selectbox("Series", series["_label"].tolist(), index=0, key="series_choice")
         chosen_series_code = s_choice.split(" — ")[0].strip()
         series_label = s_choice
 
@@ -484,17 +485,21 @@ if mode == "Browse SDG Catalog":
 
     geo["_label"] = geo[geo_name].astype(str) + " (M49 " + geo[geo_code].astype(str) + ")"
     geo_options = geo.sort_values(geo_name)["_label"].tolist()
-    selected_geo = st.sidebar.multiselect("GeoAreas", geo_options, default=geo_options[:2])
+
+    selected_geo = st.sidebar.multiselect(
+        "GeoAreas", geo_options, default=geo_options[:2], key=f"geoareas_{mode}"
+    )
     area_codes = [re.search(r"\(M49\s+([0-9]+)\)", x).group(1) for x in selected_geo] if selected_geo else []
 
-    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000)
-    run = st.sidebar.button("Fetch Data", type="primary")
+    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="page_size")
+    run = st.sidebar.button("Fetch Data", type="primary", key="fetch_data_btn")
 
     if run and area_codes:
         with st.spinner("Fetching SDG observations..."):
             if chosen_series_code:
                 df_raw, cache_key, cache_hit = fetch_series_data(
-                    chosen_series_code, area_codes, page_size, disk_cache, label=series_label or f"Series {chosen_series_code}"
+                    chosen_series_code, area_codes, page_size, disk_cache,
+                    label=series_label or f"Series {chosen_series_code}"
                 )
                 meta_note = f"Source: Series/Data | seriesCode={chosen_series_code} | cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
             else:
@@ -518,18 +523,22 @@ elif mode == "Quick Indicator Fetch":
         st.stop()
 
     inds["_label"] = inds[ind_code].astype(str) + (" — " + inds[ind_desc].astype(str) if ind_desc else "")
-    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0)
+    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="quick_ind_choice")
     chosen_ind_code = ind_choice.split(" — ")[0].strip()
 
     geo_code = _pick_col(geo, ["geoAreaCode", "GeoAreaCode", "areaCode", "geoAreaCode.value"])
     geo_name = _pick_col(geo, ["geoAreaName", "GeoAreaName", "areaName", "geoAreaName.value"])
+
     geo["_label"] = geo[geo_name].astype(str) + " (M49 " + geo[geo_code].astype(str) + ")"
     geo_options = geo.sort_values(geo_name)["_label"].tolist()
-    selected_geo = st.sidebar.multiselect("GeoAreas", geo_options, default=geo_options[:2])
+
+    selected_geo = st.sidebar.multiselect(
+        "GeoAreas", geo_options, default=geo_options[:2], key=f"geoareas_{mode}"
+    )
     area_codes = [re.search(r"\(M49\s+([0-9]+)\)", x).group(1) for x in selected_geo] if selected_geo else []
 
-    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000)
-    run = st.sidebar.button("Fetch Data", type="primary")
+    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="quick_page_size")
+    run = st.sidebar.button("Fetch Data", type="primary", key="quick_fetch_btn")
 
     if run and area_codes:
         with st.spinner("Fetching SDG observations..."):
@@ -540,7 +549,7 @@ elif mode == "Quick Indicator Fetch":
 
 else:
     st.sidebar.subheader("Upload dataset")
-    up = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"])
+    up = st.sidebar.file_uploader("Upload CSV or Excel", type=["csv", "xlsx", "xls"], key="uploader")
     if up is not None:
         df_raw = read_uploaded_table(up)
         meta_note = f"Source: Upload | file={up.name}"
@@ -557,14 +566,15 @@ with st.expander("Diagnostics / Raw preview (optional)"):
     st.dataframe(df_raw.head(200), use_container_width=True)
 
 # -----------------------------
-# ✅ Export raw dataset (CSV + Parquet in-memory) (PATCH)
+# ✅ Export raw dataset (CSV + Parquet in-memory)
 # -----------------------------
 st.sidebar.subheader("Export")
 st.sidebar.download_button(
     "Download raw as CSV",
     df_raw.to_csv(index=False).encode("utf-8"),
     file_name="sdg_raw_export.csv",
-    mime="text/csv"
+    mime="text/csv",
+    key="dl_raw_csv",
 )
 
 try:
@@ -574,13 +584,14 @@ try:
         "Download raw as Parquet",
         buf.getvalue(),
         file_name="sdg_raw_export.parquet",
-        mime="application/octet-stream"
+        mime="application/octet-stream",
+        key="dl_raw_parquet",
     )
 except Exception:
     st.sidebar.caption("Parquet export requires pyarrow (kept in requirements.txt).")
 
 # -----------------------------
-# Disaggregation filters from RAW (auto)
+# Disaggregation filters from RAW (auto) ✅ UNIQUE KEYS (PATCH)
 # -----------------------------
 st.sidebar.subheader("Disaggregation filters (auto)")
 raw_cat_cols = []
@@ -607,7 +618,13 @@ for c in raw_cat_cols[:MAX_DIM_FILTERS]:
     opts = sorted(s.unique().tolist())
     if len(opts) > MAX_OPTIONS:
         opts = opts[:MAX_OPTIONS]
-    chosen = st.sidebar.multiselect(f"{c}", opts, default=[])
+
+    chosen = st.sidebar.multiselect(
+        label=str(c),
+        options=opts,
+        default=[],
+        key=f"raw_dim_{mode}_{str(c)}"
+    )
     if chosen:
         chosen_dim_filters[c] = set(chosen)
 
@@ -627,7 +644,7 @@ if df.empty:
     st.stop()
 
 # -----------------------------
-# Extra filters (cleaned data)
+# Extra filters (cleaned data) ✅ UNIQUE KEYS (PATCH)
 # -----------------------------
 st.sidebar.subheader("Extra filters (cleaned data)")
 cat_cols = []
@@ -651,7 +668,13 @@ for c in cat_cols[:6]:
     opts = sorted(s.unique().tolist())
     if len(opts) > 2000:
         opts = opts[:2000]
-    chosen = st.sidebar.multiselect(f"{c}", opts, default=[])
+
+    chosen = st.sidebar.multiselect(
+        label=str(c),
+        options=opts,
+        default=[],
+        key=f"clean_dim_{mode}_{str(c)}"
+    )
     if chosen:
         selected_filters[c] = set(chosen)
 
@@ -739,9 +762,10 @@ st.download_button(
     data=df_f.to_csv(index=False).encode("utf-8"),
     file_name="cleaned_dashboard_data.csv",
     mime="text/csv",
+    key="dl_cleaned_csv",
 )
 
 st.caption(
-    "✅ Streamlit Cloud safe: cache writes to /tmp via tempfile.gettempdir(). "
-    "Disk cache stores fetched datasets under /tmp/un_sdg_dashboard/.cache_sdg as Parquet/CSV/JSON for faster reloads."
+    "✅ Streamlit Cloud safe: writes only to /tmp via tempfile.gettempdir(). "
+    "✅ Widget IDs stabilized with unique keys for dynamic multiselect filters."
 )
