@@ -12,6 +12,10 @@ import streamlit as st
 import plotly.express as px
 from dateutil.parser import parse as dtparse
 
+
+# =============================
+# Page config
+# =============================
 st.set_page_config(page_title="UN Dashboard (UNSD SDG API v5 + Upload)", layout="wide")
 
 # UNSDGAPIV5 swagger reference: https://unstats.un.org/sdgs/UNSDGAPIV5/swagger/index.html
@@ -22,24 +26,29 @@ UNSD_V5_API = f"{UNSD_V5_BASE}/v1/sdg"
 UNSD_V1_BASE = "https://unstats.un.org/SDGAPI"
 UNSD_V1_API = f"{UNSD_V1_BASE}/v1/sdg"
 
-# -----------------------------
-# ✅ STREAMLIT CLOUD SAFE WRITABLE DIRS
-# -----------------------------
+
+# =============================
+# ✅ STREAMLIT CLOUD SAFE WRITABLE DIRS (PermissionError patch)
+# =============================
 RUNTIME_DIR = Path(tempfile.gettempdir()) / "un_sdg_dashboard"
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_DIR = RUNTIME_DIR / ".cache_sdg"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------
-# Robust helpers
-# -----------------------------
+
+# =============================
+# Helpers
+# =============================
 def _safe_get_json(url: str, params: dict | None = None, timeout: int = 60):
     r = requests.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
 
+
 def _rows_from_json(j):
+    # Handle common shapes:
+    # 1) {"data":[...]}  2) [...]  3) {"Data":[...]} etc
     if isinstance(j, dict) and "data" in j and isinstance(j["data"], list):
         return j["data"]
     if isinstance(j, list):
@@ -49,23 +58,30 @@ def _rows_from_json(j):
             return j[k]
     return []
 
+
 def _pick_col(df: pd.DataFrame, candidates: list[str]):
-    cols_lower = {c.lower(): c for c in df.columns}
+    if df is None or df.empty:
+        return None
+    cols_lower = {str(c).lower(): c for c in df.columns}
     for cand in candidates:
-        if cand.lower() in cols_lower:
-            return cols_lower[cand.lower()]
+        if str(cand).lower() in cols_lower:
+            return cols_lower[str(cand).lower()]
+    # fuzzy contains
     for cand in candidates:
         for c in df.columns:
-            if cand.lower() in c.lower():
+            if str(cand).lower() in str(c).lower():
                 return c
     return None
+
 
 def make_hashable_for_uniques(s: pd.Series) -> pd.Series:
     def _fix(v):
         if isinstance(v, (list, dict, set, tuple)):
             return str(v)
         return v
+
     return s.map(_fix)
+
 
 def _coerce_year(series: pd.Series) -> pd.Series:
     y = pd.to_numeric(series, errors="coerce")
@@ -87,6 +103,7 @@ def _coerce_year(series: pd.Series) -> pd.Series:
 
     return series.apply(extract_year)
 
+
 def read_uploaded_table(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     data = uploaded_file.read()
@@ -96,15 +113,18 @@ def read_uploaded_table(uploaded_file) -> pd.DataFrame:
         return pd.read_excel(io.BytesIO(data))
     raise ValueError("Unsupported file type. Upload CSV or Excel.")
 
-# -----------------------------
+
+# =============================
 # Disk cache helpers
-# -----------------------------
+# =============================
 def stable_key(payload: dict) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
 
+
 def cache_paths(key: str):
     return (CACHE_DIR / f"{key}.parquet", CACHE_DIR / f"{key}.csv", CACHE_DIR / f"{key}.json")
+
 
 def cache_read(key: str) -> pd.DataFrame | None:
     p_parq, _, _ = cache_paths(key)
@@ -115,8 +135,10 @@ def cache_read(key: str) -> pd.DataFrame | None:
             return None
     return None
 
+
 def cache_write(key: str, df: pd.DataFrame, meta: dict):
     p_parq, p_csv, p_meta = cache_paths(key)
+    # Prefer parquet; always attempt CSV + meta
     try:
         df.to_parquet(p_parq, index=False)
     except Exception:
@@ -130,6 +152,7 @@ def cache_write(key: str, df: pd.DataFrame, meta: dict):
     except Exception:
         pass
 
+
 def list_cache_items(limit: int = 30):
     items = []
     for meta_file in sorted(CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -137,20 +160,23 @@ def list_cache_items(limit: int = 30):
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             key = meta_file.stem
             p_parq, p_csv, _ = cache_paths(key)
-            items.append({
-                "key": key,
-                "type": meta.get("type"),
-                "label": meta.get("label"),
-                "created": meta.get("created"),
-                "rows": meta.get("rows"),
-                "parquet": str(p_parq) if p_parq.exists() else "",
-                "csv": str(p_csv) if p_csv.exists() else "",
-            })
+            items.append(
+                {
+                    "key": key,
+                    "type": meta.get("type"),
+                    "label": meta.get("label"),
+                    "created": meta.get("created"),
+                    "rows": meta.get("rows"),
+                    "parquet": str(p_parq) if p_parq.exists() else "",
+                    "csv": str(p_csv) if p_csv.exists() else "",
+                }
+            )
         except Exception:
             continue
         if len(items) >= limit:
             break
     return items
+
 
 def clear_cache():
     for p in CACHE_DIR.glob("*"):
@@ -159,9 +185,10 @@ def clear_cache():
         except Exception:
             pass
 
-# -----------------------------
+
+# =============================
 # Endpoint fallback utilities
-# -----------------------------
+# =============================
 def try_get_first_json(paths: list[tuple[str, dict | None]]):
     last_err = None
     for url, params in paths:
@@ -172,73 +199,81 @@ def try_get_first_json(paths: list[tuple[str, dict | None]]):
             continue
     raise last_err if last_err else RuntimeError("No endpoints succeeded.")
 
+
 def json_to_df(rows) -> pd.DataFrame:
+    # Flatten nested objects (helps nunique / filters)
     return pd.json_normalize(rows, sep=".")
 
-# -----------------------------
+
+# =============================
 # UNSD SDG API: lists + data
-# -----------------------------
+# =============================
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_geoareas():
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/GeoArea/List", None),
-        (f"{UNSD_V1_API}/GeoArea/List", None),
-    ])
+    j = try_get_first_json([(f"{UNSD_V5_API}/GeoArea/List", None), (f"{UNSD_V1_API}/GeoArea/List", None)])
     return json_to_df(_rows_from_json(j))
+
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_goals():
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/Goal/List", None),
-        (f"{UNSD_V1_API}/Goal/List", None),
-    ])
+    j = try_get_first_json([(f"{UNSD_V5_API}/Goal/List", None), (f"{UNSD_V1_API}/Goal/List", None)])
     return json_to_df(_rows_from_json(j))
+
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_targets(goal_code: str):
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/Goal/{goal_code}/Target/List", None),
-        (f"{UNSD_V1_API}/Goal/{goal_code}/Target/List", None),
-        (f"{UNSD_V5_API}/Target/List", {"goalCode": goal_code}),
-        (f"{UNSD_V1_API}/Target/List", {"goalCode": goal_code}),
-    ])
+    j = try_get_first_json(
+        [
+            (f"{UNSD_V5_API}/Goal/{goal_code}/Target/List", None),
+            (f"{UNSD_V1_API}/Goal/{goal_code}/Target/List", None),
+            (f"{UNSD_V5_API}/Target/List", {"goalCode": goal_code}),
+            (f"{UNSD_V1_API}/Target/List", {"goalCode": goal_code}),
+        ]
+    )
     return json_to_df(_rows_from_json(j))
+
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_indicators_for_target(target_code: str):
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/Target/{target_code}/Indicator/List", None),
-        (f"{UNSD_V1_API}/Target/{target_code}/Indicator/List", None),
-        (f"{UNSD_V5_API}/Indicator/List", {"targetCode": target_code}),
-        (f"{UNSD_V1_API}/Indicator/List", {"targetCode": target_code}),
-    ])
+    j = try_get_first_json(
+        [
+            (f"{UNSD_V5_API}/Target/{target_code}/Indicator/List", None),
+            (f"{UNSD_V1_API}/Target/{target_code}/Indicator/List", None),
+            (f"{UNSD_V5_API}/Indicator/List", {"targetCode": target_code}),
+            (f"{UNSD_V1_API}/Indicator/List", {"targetCode": target_code}),
+        ]
+    )
     return json_to_df(_rows_from_json(j))
+
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_all_indicators():
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/Indicator/List", None),
-        (f"{UNSD_V1_API}/Indicator/List", None),
-    ])
+    j = try_get_first_json([(f"{UNSD_V5_API}/Indicator/List", None), (f"{UNSD_V1_API}/Indicator/List", None)])
     return json_to_df(_rows_from_json(j))
+
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_series_for_indicator(indicator_code: str):
-    j = try_get_first_json([
-        (f"{UNSD_V5_API}/Indicator/{indicator_code}/Series/List", None),
-        (f"{UNSD_V1_API}/Indicator/{indicator_code}/Series/List", None),
-        (f"{UNSD_V5_API}/Series/List", {"indicator": indicator_code}),
-        (f"{UNSD_V1_API}/Series/List", {"indicator": indicator_code}),
-    ])
+    j = try_get_first_json(
+        [
+            (f"{UNSD_V5_API}/Indicator/{indicator_code}/Series/List", None),
+            (f"{UNSD_V1_API}/Indicator/{indicator_code}/Series/List", None),
+            (f"{UNSD_V5_API}/Series/List", {"indicator": indicator_code}),
+            (f"{UNSD_V1_API}/Series/List", {"indicator": indicator_code}),
+        ]
+    )
     return json_to_df(_rows_from_json(j))
+
 
 def _fetch_series_data_no_cache(series_code: str, area_codes: list[str], page_size: int = 10000):
     frames = []
     for ac in area_codes:
-        j = try_get_first_json([
-            (f"{UNSD_V5_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
-            (f"{UNSD_V1_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
-        ])
+        j = try_get_first_json(
+            [
+                (f"{UNSD_V5_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
+                (f"{UNSD_V1_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
+            ]
+        )
         rows = _rows_from_json(j)
         if not rows:
             continue
@@ -248,13 +283,16 @@ def _fetch_series_data_no_cache(series_code: str, area_codes: list[str], page_si
         frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+
 def _fetch_indicator_data_no_cache(indicator_code: str, area_codes: list[str], page_size: int = 10000):
     frames = []
     for ac in area_codes:
-        j = try_get_first_json([
-            (f"{UNSD_V5_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
-            (f"{UNSD_V1_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
-        ])
+        j = try_get_first_json(
+            [
+                (f"{UNSD_V5_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
+                (f"{UNSD_V1_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
+            ]
+        )
         rows = _rows_from_json(j)
         if not rows:
             continue
@@ -264,6 +302,7 @@ def _fetch_indicator_data_no_cache(indicator_code: str, area_codes: list[str], p
         frames.append(df)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
+
 def fetch_series_data(series_code: str, area_codes: list[str], page_size: int, disk_cache: bool, label: str):
     payload = {"type": "series", "seriesCode": series_code, "areaCodes": sorted(area_codes), "pageSize": page_size}
     key = stable_key(payload)
@@ -271,11 +310,19 @@ def fetch_series_data(series_code: str, area_codes: list[str], page_size: int, d
         cached = cache_read(key)
         if cached is not None and not cached.empty:
             return cached, key, True
+
     df = _fetch_series_data_no_cache(series_code, area_codes, page_size=page_size)
     if disk_cache and not df.empty:
-        meta = {"type": "series", "label": label, "created": pd.Timestamp.utcnow().isoformat(), "rows": int(df.shape[0]), **payload}
+        meta = {
+            "type": "series",
+            "label": label,
+            "created": pd.Timestamp.utcnow().isoformat(),
+            "rows": int(df.shape[0]),
+            **payload,
+        }
         cache_write(key, df, meta)
     return df, key, False
+
 
 def fetch_indicator_data(indicator_code: str, area_codes: list[str], page_size: int, disk_cache: bool, label: str):
     payload = {"type": "indicator", "indicator": indicator_code, "areaCodes": sorted(area_codes), "pageSize": page_size}
@@ -284,35 +331,69 @@ def fetch_indicator_data(indicator_code: str, area_codes: list[str], page_size: 
         cached = cache_read(key)
         if cached is not None and not cached.empty:
             return cached, key, True
+
     df = _fetch_indicator_data_no_cache(indicator_code, area_codes, page_size=page_size)
     if disk_cache and not df.empty:
-        meta = {"type": "indicator", "label": label, "created": pd.Timestamp.utcnow().isoformat(), "rows": int(df.shape[0]), **payload}
+        meta = {
+            "type": "indicator",
+            "label": label,
+            "created": pd.Timestamp.utcnow().isoformat(),
+            "rows": int(df.shape[0]),
+            **payload,
+        }
         cache_write(key, df, meta)
     return df, key, False
 
-# -----------------------------
+
+# =============================
 # Dataset normalization for charting
-# -----------------------------
+# =============================
 def normalize_dataset(df: pd.DataFrame):
     if df.empty:
         return df, None, None, None
 
-    year_col_guess = _pick_col(df, [
-        "timePeriodStart", "timePeriod", "year", "Year",
-        "timePeriodStart.value", "timePeriod.value"
-    ])
-    value_col_guess = _pick_col(df, [
-        "value", "Value", "obsValue", "ObservationValue",
-        "value.value"
-    ])
-    area_name_guess = _pick_col(df, [
-        "geoAreaName", "GeoAreaName", "geoAreaName.value",
-        "areaName", "Country", "country"
-    ])
-    area_code_guess = _pick_col(df, [
-        "geoAreaCode", "GeoAreaCode", "geoAreaCode.value",
-        "areaCode", "__areaCode_req"
-    ])
+    year_col_guess = _pick_col(
+        df,
+        [
+            "timePeriodStart",
+            "timePeriod",
+            "year",
+            "Year",
+            "timePeriodStart.value",
+            "timePeriod.value",
+        ],
+    )
+    value_col_guess = _pick_col(
+        df,
+        [
+            "value",
+            "Value",
+            "obsValue",
+            "ObservationValue",
+            "value.value",
+        ],
+    )
+    area_name_guess = _pick_col(
+        df,
+        [
+            "geoAreaName",
+            "GeoAreaName",
+            "geoAreaName.value",
+            "areaName",
+            "Country",
+            "country",
+        ],
+    )
+    area_code_guess = _pick_col(
+        df,
+        [
+            "geoAreaCode",
+            "GeoAreaCode",
+            "geoAreaCode.value",
+            "areaCode",
+            "__areaCode_req",
+        ],
+    )
 
     df2 = df.copy()
 
@@ -321,17 +402,19 @@ def normalize_dataset(df: pd.DataFrame):
         area_name_guess = "geoAreaName"
 
     if year_col_guess is None:
-        maybe_time = [c for c in df2.columns if any(k in c.lower() for k in ["time", "period", "year"])]
+        maybe_time = [c for c in df2.columns if any(k in str(c).lower() for k in ["time", "period", "year"])]
         year_col_guess = maybe_time[0] if maybe_time else None
 
     if value_col_guess is None:
-        maybe_val = [c for c in df2.columns if "value" in c.lower()]
+        maybe_val = [c for c in df2.columns if "value" in str(c).lower()]
         value_col_guess = maybe_val[0] if maybe_val else None
 
     df2["__year"] = _coerce_year(df2[year_col_guess]) if year_col_guess else np.nan
     df2["__value"] = pd.to_numeric(df2[value_col_guess], errors="coerce") if value_col_guess else np.nan
-    df2["__group"] = df2[area_name_guess].astype(str) if area_name_guess else (
-        df2[area_code_guess].astype(str) if area_code_guess else "All"
+    df2["__group"] = (
+        df2[area_name_guess].astype(str)
+        if area_name_guess
+        else (df2[area_code_guess].astype(str) if area_code_guess else "All")
     )
 
     cleaned = df2.dropna(subset=["__year", "__value"]).copy()
@@ -339,9 +422,10 @@ def normalize_dataset(df: pd.DataFrame):
 
     return cleaned, "__year", "__value", "__group"
 
-# -----------------------------
+
+# =============================
 # KPI
-# -----------------------------
+# =============================
 def compute_kpis(df: pd.DataFrame, year_col: str, value_col: str, group_col: str):
     rows = []
     for g, sub in df.dropna(subset=[year_col, value_col]).groupby(group_col):
@@ -371,29 +455,37 @@ def compute_kpis(df: pd.DataFrame, year_col: str, value_col: str, group_col: str
         if pct.notna().sum() >= 2:
             vol = pct.std() * 100.0
 
-        rows.append({
-            group_col: g,
-            "Latest year": int(latest_year) if pd.notna(latest_year) else latest_year,
-            "Latest value": latest_val,
-            "YoY %": yoy,
-            "CAGR % (≈5y)": cagr,
-            "Volatility %": vol,
-            "Obs count": int(sub[value_col].notna().sum()),
-        })
+        rows.append(
+            {
+                group_col: g,
+                "Latest year": int(latest_year) if pd.notna(latest_year) else latest_year,
+                "Latest value": latest_val,
+                "YoY %": yoy,
+                "CAGR % (≈5y)": cagr,
+                "Volatility %": vol,
+                "Obs count": int(sub[value_col].notna().sum()),
+            }
+        )
     return pd.DataFrame(rows)
 
-# -----------------------------
+
+# =============================
 # UI
-# -----------------------------
+# =============================
 st.title("UN Office for Partnerships — SDG Data Explorer + Finance Dashboard")
 st.caption(
-    "Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, render 10 chart types, "
-    "and cache datasets safely on Streamlit Cloud."
+    "Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, "
+    "render 10 chart types, cache datasets safely on Streamlit Cloud."
 )
 
-mode = st.sidebar.radio("Mode", ["Browse SDG Catalog", "Quick Indicator Fetch", "Upload CSV/XLSX"], index=0, key="mode")
+mode = st.sidebar.radio(
+    "Mode",
+    ["Browse SDG Catalog", "Quick Indicator Fetch", "Upload CSV/XLSX"],
+    index=0,
+    key="mode",
+)
 
-# Disk cache controls
+# Performance / cache controls
 st.sidebar.subheader("Performance")
 disk_cache = st.sidebar.toggle("Enable disk cache (Parquet/CSV)", value=True, key="disk_cache")
 
@@ -401,19 +493,25 @@ with st.sidebar.expander("Cache utilities"):
     if st.button("Clear disk cache", key="clear_cache_btn"):
         clear_cache()
         st.success("Cache cleared.")
-    items = list_cache_items(limit=15)
+
     st.caption(f"Cache directory: {str(CACHE_DIR)}")
+    items = list_cache_items(limit=15)
     if items:
         st.caption("Recent cached datasets")
         st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
     else:
         st.caption("No cached datasets yet.")
 
+
 df_raw = pd.DataFrame()
 meta_note = ""
 cache_key = ""
 cache_hit = False
 
+
+# =============================
+# Data acquisition by mode
+# =============================
 if mode == "Browse SDG Catalog":
     st.sidebar.subheader("Catalog Browser")
 
@@ -446,61 +544,91 @@ if mode == "Browse SDG Catalog":
     target_choice = st.sidebar.selectbox("Target", targets["_label"].tolist(), index=0, key="target_choice")
     chosen_target_code = target_choice.split(" — ")[0].strip()
 
-   with st.spinner("Loading Indicators..."):
-    inds = fetch_indicators_for_target(chosen_target_code)
+    # -----------------------------
+    # ✅ Indicators (robust detection + fallback + indentation-safe)
+    # -----------------------------
+    with st.spinner("Loading Indicators..."):
+        inds = fetch_indicators_for_target(chosen_target_code)
 
-# If API returns nothing, stop gracefully
-if inds is None or inds.empty:
-    st.error("Indicator list is empty for this target (API returned no rows). Try another target.")
-    st.stop()
+    if inds is None or inds.empty:
+        st.error("Indicator list is empty for this target (API returned no rows). Try another target.")
+        st.stop()
 
-# Helpful diagnostics
-with st.expander("Indicator response diagnostics (click to view)"):
-    st.write("Columns returned:", list(inds.columns))
-    st.dataframe(inds.head(50), use_container_width=True)
+    with st.expander("Indicator response diagnostics (click to view)"):
+        st.write("Columns returned:", list(inds.columns))
+        st.dataframe(inds.head(50), use_container_width=True)
 
-# Expanded detection list (handles nested normalization + case variants)
-ind_code = _pick_col(inds, [
-    "code", "Code",
-    "indicator", "Indicator",
-    "indicatorCode", "IndicatorCode",
-    "indicator.code", "Indicator.code",
-    "indicatorCode.value", "IndicatorCode.value",
-    "indicator.code.value", "Indicator.code.value",
-    "indicatorId", "IndicatorId",
-])
-ind_desc = _pick_col(inds, [
-    "description", "Description",
-    "indicatorDescription", "IndicatorDescription",
-    "name", "Name",
-    "title", "Title",
-    "indicator.description", "Indicator.description",
-    "indicatorDescription.value", "IndicatorDescription.value",
-])
-
-# Fallback: let user choose the code column if we still can't infer it
-if ind_code is None:
-    # rank columns that look like indicator code
-    code_like = [c for c in inds.columns if re.search(r"(indicator.*code|^code$)", str(c), flags=re.I)]
-    # if nothing obvious, allow any column
-    candidates = code_like if code_like else list(inds.columns)
-
-    st.sidebar.warning("Indicator code column was not detected automatically — please select it.")
-    ind_code = st.sidebar.selectbox(
-        "Indicator code column",
-        candidates,
-        index=0,
-        key="ind_code_col_fallback"
+    ind_code = _pick_col(
+        inds,
+        [
+            "code",
+            "Code",
+            "indicator",
+            "Indicator",
+            "indicatorCode",
+            "IndicatorCode",
+            "indicator.code",
+            "Indicator.code",
+            "indicatorCode.value",
+            "IndicatorCode.value",
+            "indicator.code.value",
+            "Indicator.code.value",
+            "indicatorId",
+            "IndicatorId",
+        ],
+    )
+    ind_desc = _pick_col(
+        inds,
+        [
+            "description",
+            "Description",
+            "indicatorDescription",
+            "IndicatorDescription",
+            "name",
+            "Name",
+            "title",
+            "Title",
+            "indicator.description",
+            "Indicator.description",
+            "indicatorDescription.value",
+            "IndicatorDescription.value",
+        ],
     )
 
-# Build label safely
-inds["_label"] = inds[ind_code].astype(str)
-if ind_desc is not None:
-    inds["_label"] = inds["_label"] + " — " + inds[ind_desc].astype(str)
+    if ind_code is None:
+        code_like = [c for c in inds.columns if re.search(r"(indicator.*code|^code$)", str(c), flags=re.I)]
+        candidates = code_like if code_like else list(inds.columns)
 
-ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="ind_choice")
-chosen_ind_code = ind_choice.split(" — ")[0].strip()
-series_label = s_choice
+        st.sidebar.warning("Indicator code column not detected automatically — please select it.")
+        ind_code = st.sidebar.selectbox(
+            "Indicator code column",
+            candidates,
+            index=0,
+            key="ind_code_col_fallback",
+        )
+
+    inds["_label"] = inds[ind_code].astype(str)
+    if ind_desc is not None:
+        inds["_label"] = inds["_label"] + " — " + inds[ind_desc].astype(str)
+
+    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="ind_choice")
+    chosen_ind_code = ind_choice.split(" — ")[0].strip()
+
+    with st.spinner("Loading Series..."):
+        series = fetch_series_for_indicator(chosen_ind_code)
+
+    series_code = _pick_col(series, ["seriesCode", "series", "code"])
+    series_desc = _pick_col(series, ["seriesDescription", "description", "name", "title"])
+
+    if series_code is None:
+        st.sidebar.warning("Series list not available for this indicator. Will use Indicator/Data.")
+        chosen_series_code = None
+        series_label = ""
+    else:
+        series["_label"] = series[series_code].astype(str) + (" — " + series[series_desc].astype(str) if series_desc else "")
+        s_choice = st.sidebar.selectbox("Series", series["_label"].tolist(), index=0, key="series_choice")
+        chosen_series_code = s_choice.split(" — ")[0].strip()
+        series_label = s_choice
 
     geo_code = _pick_col(geo, ["geoAreaCode", "GeoAreaCode", "areaCode", "geoAreaCode.value"])
     geo_name = _pick_col(geo, ["geoAreaName", "GeoAreaName", "areaName", "geoAreaName.value"])
@@ -512,27 +640,38 @@ series_label = s_choice
     geo["_label"] = geo[geo_name].astype(str) + " (M49 " + geo[geo_code].astype(str) + ")"
     geo_options = geo.sort_values(geo_name)["_label"].tolist()
 
-    selected_geo = st.sidebar.multiselect(
-        "GeoAreas", geo_options, default=geo_options[:2], key=f"geoareas_{mode}"
-    )
+    selected_geo = st.sidebar.multiselect("GeoAreas", geo_options, default=geo_options[:2], key="geoareas_browse")
     area_codes = [re.search(r"\(M49\s+([0-9]+)\)", x).group(1) for x in selected_geo] if selected_geo else []
 
-    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="page_size")
+    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="page_size_browse")
     run = st.sidebar.button("Fetch Data", type="primary", key="fetch_data_btn")
 
     if run and area_codes:
         with st.spinner("Fetching SDG observations..."):
             if chosen_series_code:
                 df_raw, cache_key, cache_hit = fetch_series_data(
-                    chosen_series_code, area_codes, page_size, disk_cache,
-                    label=series_label or f"Series {chosen_series_code}"
+                    chosen_series_code,
+                    area_codes,
+                    page_size,
+                    disk_cache,
+                    label=series_label or f"Series {chosen_series_code}",
                 )
-                meta_note = f"Source: Series/Data | seriesCode={chosen_series_code} | cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+                meta_note = (
+                    f"Source: Series/Data | seriesCode={chosen_series_code} | "
+                    f"cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+                )
             else:
                 df_raw, cache_key, cache_hit = fetch_indicator_data(
-                    chosen_ind_code, area_codes, page_size, disk_cache, label=ind_choice
+                    chosen_ind_code,
+                    area_codes,
+                    page_size,
+                    disk_cache,
+                    label=ind_choice,
                 )
-                meta_note = f"Source: Indicator/Data | indicator={chosen_ind_code} | cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+                meta_note = (
+                    f"Source: Indicator/Data | indicator={chosen_ind_code} | "
+                    f"cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+                )
 
 elif mode == "Quick Indicator Fetch":
     st.sidebar.subheader("Indicator Fetch")
@@ -541,37 +680,84 @@ elif mode == "Quick Indicator Fetch":
         geo = fetch_geoareas()
         inds = fetch_all_indicators()
 
-    ind_code = _pick_col(inds, ["code", "indicator", "indicatorCode"])
-    ind_desc = _pick_col(inds, ["description", "indicatorDescription", "name", "title"])
-    if ind_code is None:
-        st.error("Could not detect indicator code in Indicator/List response.")
-        st.dataframe(inds.head(50), use_container_width=True)
+    if inds is None or inds.empty:
+        st.error("Indicator list is empty (API returned no rows).")
         st.stop()
 
-    inds["_label"] = inds[ind_code].astype(str) + (" — " + inds[ind_desc].astype(str) if ind_desc else "")
+    ind_code = _pick_col(
+        inds,
+        [
+            "code",
+            "Code",
+            "indicatorCode",
+            "IndicatorCode",
+            "indicator.code",
+            "Indicator.code",
+            "indicatorCode.value",
+            "IndicatorCode.value",
+            "indicator.code.value",
+            "Indicator.code.value",
+        ],
+    )
+    ind_desc = _pick_col(
+        inds,
+        [
+            "description",
+            "Description",
+            "name",
+            "Name",
+            "title",
+            "Title",
+            "indicatorDescription",
+            "IndicatorDescription",
+            "indicator.description",
+            "Indicator.description",
+        ],
+    )
+
+    if ind_code is None:
+        st.error("Could not detect indicator code in Indicator/List response.")
+        with st.expander("Indicator list diagnostics (click to view)"):
+            st.write("Columns:", list(inds.columns))
+            st.dataframe(inds.head(50), use_container_width=True)
+        st.stop()
+
+    inds["_label"] = inds[ind_code].astype(str)
+    if ind_desc is not None:
+        inds["_label"] = inds["_label"] + " — " + inds[ind_desc].astype(str)
+
     ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="quick_ind_choice")
     chosen_ind_code = ind_choice.split(" — ")[0].strip()
 
     geo_code = _pick_col(geo, ["geoAreaCode", "GeoAreaCode", "areaCode", "geoAreaCode.value"])
     geo_name = _pick_col(geo, ["geoAreaName", "GeoAreaName", "areaName", "geoAreaName.value"])
+    if geo_code is None or geo_name is None:
+        st.error("Could not detect GeoArea code/name.")
+        st.dataframe(geo.head(50), use_container_width=True)
+        st.stop()
 
     geo["_label"] = geo[geo_name].astype(str) + " (M49 " + geo[geo_code].astype(str) + ")"
     geo_options = geo.sort_values(geo_name)["_label"].tolist()
 
-    selected_geo = st.sidebar.multiselect(
-        "GeoAreas", geo_options, default=geo_options[:2], key=f"geoareas_{mode}"
-    )
+    selected_geo = st.sidebar.multiselect("GeoAreas", geo_options, default=geo_options[:2], key="geoareas_quick")
     area_codes = [re.search(r"\(M49\s+([0-9]+)\)", x).group(1) for x in selected_geo] if selected_geo else []
 
-    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="quick_page_size")
+    page_size = st.sidebar.slider("Page size", 1000, 20000, 10000, 1000, key="page_size_quick")
     run = st.sidebar.button("Fetch Data", type="primary", key="quick_fetch_btn")
 
     if run and area_codes:
         with st.spinner("Fetching SDG observations..."):
             df_raw, cache_key, cache_hit = fetch_indicator_data(
-                chosen_ind_code, area_codes, page_size, disk_cache, label=ind_choice
+                chosen_ind_code,
+                area_codes,
+                page_size,
+                disk_cache,
+                label=ind_choice,
             )
-            meta_note = f"Source: Indicator/Data | indicator={chosen_ind_code} | cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+            meta_note = (
+                f"Source: Indicator/Data | indicator={chosen_ind_code} | "
+                f"cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
+            )
 
 else:
     st.sidebar.subheader("Upload dataset")
@@ -580,20 +766,26 @@ else:
         df_raw = read_uploaded_table(up)
         meta_note = f"Source: Upload | file={up.name}"
 
+
+# =============================
+# Stop if no data yet
+# =============================
 if df_raw.empty:
     st.info("Select items and click **Fetch Data**, or upload a dataset to begin.")
     st.stop()
 
-# -----------------------------
-# Diagnostics / Raw preview
-# -----------------------------
+
+# =============================
+# Diagnostics / raw preview
+# =============================
 with st.expander("Diagnostics / Raw preview (optional)"):
     st.write(meta_note)
     st.dataframe(df_raw.head(200), use_container_width=True)
 
-# -----------------------------
+
+# =============================
 # ✅ Export raw dataset (CSV + Parquet in-memory)
-# -----------------------------
+# =============================
 st.sidebar.subheader("Export")
 st.sidebar.download_button(
     "Download raw as CSV",
@@ -616,10 +808,13 @@ try:
 except Exception:
     st.sidebar.caption("Parquet export requires pyarrow (kept in requirements.txt).")
 
-# -----------------------------
-# Disaggregation filters from RAW (auto) ✅ UNIQUE KEYS (PATCH)
-# -----------------------------
+
+# =============================
+# Disaggregation filters from RAW (auto)
+# ✅ StreamlitDuplicateElementId fix: UNIQUE keys
+# =============================
 st.sidebar.subheader("Disaggregation filters (auto)")
+
 raw_cat_cols = []
 for c in df_raw.columns:
     if str(c).startswith("__"):
@@ -632,6 +827,7 @@ for c in df_raw.columns:
             nunique = s.nunique()
         except TypeError:
             nunique = s.astype(str).nunique()
+
         if 2 <= nunique <= 60:
             raw_cat_cols.append(c)
 
@@ -649,7 +845,7 @@ for c in raw_cat_cols[:MAX_DIM_FILTERS]:
         label=str(c),
         options=opts,
         default=[],
-        key=f"raw_dim_{mode}_{str(c)}"
+        key=f"raw_dim_{mode}_{str(c)}",
     )
     if chosen:
         chosen_dim_filters[c] = set(chosen)
@@ -663,16 +859,22 @@ if df_raw_f.empty:
     st.warning("Disaggregation filters removed all rows. Relax filters.")
     st.stop()
 
+
+# =============================
 # Normalize for charting
+# =============================
 df, year_col, value_col, group_col = normalize_dataset(df_raw_f)
 if df.empty:
     st.warning("No numeric time/value observations found after cleaning. Try different series/indicator/filters.")
     st.stop()
 
-# -----------------------------
-# Extra filters (cleaned data) ✅ UNIQUE KEYS (PATCH)
-# -----------------------------
+
+# =============================
+# Extra filters (cleaned data)
+# ✅ UNIQUE keys
+# =============================
 st.sidebar.subheader("Extra filters (cleaned data)")
+
 cat_cols = []
 for c in df.columns:
     if str(c).startswith("__"):
@@ -699,7 +901,7 @@ for c in cat_cols[:6]:
         label=str(c),
         options=opts,
         default=[],
-        key=f"clean_dim_{mode}_{str(c)}"
+        key=f"clean_dim_{mode}_{str(c)}",
     )
     if chosen:
         selected_filters[c] = set(chosen)
@@ -713,9 +915,10 @@ if df_f.empty:
     st.warning("Filters removed all data. Relax filters.")
     st.stop()
 
-# -----------------------------
+
+# =============================
 # KPIs
-# -----------------------------
+# =============================
 kpi_df = compute_kpis(df_f, year_col, value_col, group_col)
 
 k1, k2 = st.columns([2, 3], gap="large")
@@ -724,61 +927,105 @@ with k1:
     st.dataframe(
         kpi_df.sort_values(["Latest year", "Latest value"], ascending=[False, False]),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
+
 with k2:
     st.subheader("Observations (sample)")
     st.dataframe(
         df_f[[group_col, year_col, value_col]].sort_values([group_col, year_col]).head(300),
         use_container_width=True,
-        hide_index=True
+        hide_index=True,
     )
 
-# -----------------------------
+
+# =============================
 # 10 charts dashboard
-# -----------------------------
+# =============================
 st.subheader("Dashboard — 10 chart types")
 
 latest_year = int(df_f[year_col].max())
 latest_df = df_f[df_f[year_col] == latest_year].copy()
 agg_year_group = df_f.groupby([year_col, group_col], as_index=False)[value_col].mean()
 
-fig1 = px.line(df_f.sort_values(year_col), x=year_col, y=value_col, color=group_col, markers=True,
-               title="1) Line — Trend over time")
-
-fig2 = px.area(df_f.sort_values(year_col), x=year_col, y=value_col, color=group_col,
-               title="2) Area — Cumulative movement over time")
-
-fig3 = px.bar(latest_df, x=group_col, y=value_col,
-              title=f"3) Bar — Latest year ({latest_year}) comparison")
-
-fig4 = px.bar(agg_year_group, x=year_col, y=value_col, color=group_col, barmode="stack",
-              title="4) Stacked bar — Composition across years (mean if multiple obs)")
-
-fig5 = px.scatter(df_f, x=year_col, y=value_col, color=group_col,
-                  title="5) Scatter — Observations over time")
+fig1 = px.line(
+    df_f.sort_values(year_col),
+    x=year_col,
+    y=value_col,
+    color=group_col,
+    markers=True,
+    title="1) Line — Trend over time",
+)
+fig2 = px.area(
+    df_f.sort_values(year_col),
+    x=year_col,
+    y=value_col,
+    color=group_col,
+    title="2) Area — Cumulative movement over time",
+)
+fig3 = px.bar(
+    latest_df,
+    x=group_col,
+    y=value_col,
+    title=f"3) Bar — Latest year ({latest_year}) comparison",
+)
+fig4 = px.bar(
+    agg_year_group,
+    x=year_col,
+    y=value_col,
+    color=group_col,
+    barmode="stack",
+    title="4) Stacked bar — Composition across years (mean if multiple obs)",
+)
+fig5 = px.scatter(
+    df_f,
+    x=year_col,
+    y=value_col,
+    color=group_col,
+    title="5) Scatter — Observations over time",
+)
 
 bubble = df_f.copy()
 bubble["__size"] = bubble[value_col].abs()
-fig6 = px.scatter(bubble, x=year_col, y=value_col, size="__size", color=group_col,
-                  title="6) Bubble — Value with magnitude as bubble size")
+fig6 = px.scatter(
+    bubble,
+    x=year_col,
+    y=value_col,
+    size="__size",
+    color=group_col,
+    title="6) Bubble — Value with magnitude as bubble size",
+)
 
-fig7 = px.histogram(df_f, x=value_col, color=group_col, nbins=30,
-                    title="7) Histogram — Distribution of values")
-
+fig7 = px.histogram(
+    df_f,
+    x=value_col,
+    color=group_col,
+    nbins=30,
+    title="7) Histogram — Distribution of values",
+)
 fig8 = px.box(df_f, x=group_col, y=value_col, title="8) Box — Dispersion by GeoArea")
 
 pivot = df_f.pivot_table(index=group_col, columns=year_col, values=value_col, aggfunc="mean")
 fig9 = px.imshow(pivot, aspect="auto", title="9) Heatmap — Mean value (GeoArea × Year)")
 
 tree = latest_df.groupby(group_col, as_index=False)[value_col].mean()
-fig10 = px.treemap(tree, path=[group_col], values=value_col,
-                   title=f"10) Treemap — Latest year ({latest_year}) share (mean if multiple obs)")
+fig10 = px.treemap(tree, path=[group_col], values=value_col, title=f"10) Treemap — Latest year ({latest_year}) share")
 
-tabs = st.tabs([
-    "1 Line", "2 Area", "3 Bar", "4 Stacked bar", "5 Scatter",
-    "6 Bubble", "7 Histogram", "8 Box", "9 Heatmap", "10 Treemap"
-])
+tabs = st.tabs(
+    [
+        "1 Line",
+        "2 Area",
+        "3 Bar",
+        "4 Stacked bar",
+        "5 Scatter",
+        "6 Bubble",
+        "7 Histogram",
+        "8 Box",
+        "9 Heatmap",
+        "10 Treemap",
+    ]
+)
+
 for t, fig in zip(tabs, [fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8, fig9, fig10]):
     with t:
         st.plotly_chart(fig, use_container_width=True)
@@ -792,7 +1039,6 @@ st.download_button(
 )
 
 st.caption(
-    "✅ Streamlit Cloud safe: writes only to /tmp via tempfile.gettempdir(). "
-    "✅ Widget IDs stabilized with unique keys for dynamic multiselect filters."
+    "✅ Fixed: PermissionError (writes only to /tmp), StreamlitDuplicateElementId (unique widget keys), "
+    "and robust Indicator code detection with diagnostics + fallback selector."
 )
-
