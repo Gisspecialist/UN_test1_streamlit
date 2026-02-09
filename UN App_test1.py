@@ -446,35 +446,61 @@ if mode == "Browse SDG Catalog":
     target_choice = st.sidebar.selectbox("Target", targets["_label"].tolist(), index=0, key="target_choice")
     chosen_target_code = target_choice.split(" — ")[0].strip()
 
-    with st.spinner("Loading Indicators..."):
-        inds = fetch_indicators_for_target(chosen_target_code)
+   with st.spinner("Loading Indicators..."):
+    inds = fetch_indicators_for_target(chosen_target_code)
 
-    ind_code = _pick_col(inds, ["code", "indicator", "indicatorCode"])
-    ind_desc = _pick_col(inds, ["description", "indicatorDescription", "name", "title"])
-    if ind_code is None:
-        st.error("Could not detect indicator code in Indicator list response.")
-        st.dataframe(inds.head(50), use_container_width=True)
-        st.stop()
+# If API returns nothing, stop gracefully
+if inds is None or inds.empty:
+    st.error("Indicator list is empty for this target (API returned no rows). Try another target.")
+    st.stop()
 
-    inds["_label"] = inds[ind_code].astype(str) + (" — " + inds[ind_desc].astype(str) if ind_desc else "")
-    ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="ind_choice")
-    chosen_ind_code = ind_choice.split(" — ")[0].strip()
+# Helpful diagnostics
+with st.expander("Indicator response diagnostics (click to view)"):
+    st.write("Columns returned:", list(inds.columns))
+    st.dataframe(inds.head(50), use_container_width=True)
 
-    with st.spinner("Loading Series..."):
-        series = fetch_series_for_indicator(chosen_ind_code)
+# Expanded detection list (handles nested normalization + case variants)
+ind_code = _pick_col(inds, [
+    "code", "Code",
+    "indicator", "Indicator",
+    "indicatorCode", "IndicatorCode",
+    "indicator.code", "Indicator.code",
+    "indicatorCode.value", "IndicatorCode.value",
+    "indicator.code.value", "Indicator.code.value",
+    "indicatorId", "IndicatorId",
+])
+ind_desc = _pick_col(inds, [
+    "description", "Description",
+    "indicatorDescription", "IndicatorDescription",
+    "name", "Name",
+    "title", "Title",
+    "indicator.description", "Indicator.description",
+    "indicatorDescription.value", "IndicatorDescription.value",
+])
 
-    series_code = _pick_col(series, ["seriesCode", "series", "code"])
-    series_desc = _pick_col(series, ["seriesDescription", "description", "name", "title"])
+# Fallback: let user choose the code column if we still can't infer it
+if ind_code is None:
+    # rank columns that look like indicator code
+    code_like = [c for c in inds.columns if re.search(r"(indicator.*code|^code$)", str(c), flags=re.I)]
+    # if nothing obvious, allow any column
+    candidates = code_like if code_like else list(inds.columns)
 
-    if series_code is None:
-        st.sidebar.warning("Series list not available for this indicator. Will use Indicator/Data.")
-        chosen_series_code = None
-        series_label = ""
-    else:
-        series["_label"] = series[series_code].astype(str) + (" — " + series[series_desc].astype(str) if series_desc else "")
-        s_choice = st.sidebar.selectbox("Series", series["_label"].tolist(), index=0, key="series_choice")
-        chosen_series_code = s_choice.split(" — ")[0].strip()
-        series_label = s_choice
+    st.sidebar.warning("Indicator code column was not detected automatically — please select it.")
+    ind_code = st.sidebar.selectbox(
+        "Indicator code column",
+        candidates,
+        index=0,
+        key="ind_code_col_fallback"
+    )
+
+# Build label safely
+inds["_label"] = inds[ind_code].astype(str)
+if ind_desc is not None:
+    inds["_label"] = inds["_label"] + " — " + inds[ind_desc].astype(str)
+
+ind_choice = st.sidebar.selectbox("Indicator", inds["_label"].tolist(), index=0, key="ind_choice")
+chosen_ind_code = ind_choice.split(" — ")[0].strip()
+series_label = s_choice
 
     geo_code = _pick_col(geo, ["geoAreaCode", "GeoAreaCode", "areaCode", "geoAreaCode.value"])
     geo_name = _pick_col(geo, ["geoAreaName", "GeoAreaName", "areaName", "geoAreaName.value"])
@@ -769,3 +795,4 @@ st.caption(
     "✅ Streamlit Cloud safe: writes only to /tmp via tempfile.gettempdir(). "
     "✅ Widget IDs stabilized with unique keys for dynamic multiselect filters."
 )
+
