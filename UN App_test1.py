@@ -1,11 +1,8 @@
-from pathlib import Path
-import zipfile, textwrap, os, json, hashlib
-
-app_code = r'''import re
+import re
 import io
-import os
 import json
 import hashlib
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -19,14 +16,20 @@ st.set_page_config(page_title="UN Dashboard (UNSD SDG API v5 + Upload)", layout=
 
 # UNSDGAPIV5 swagger reference: https://unstats.un.org/sdgs/UNSDGAPIV5/swagger/index.html
 UNSD_V5_BASE = "https://unstats.un.org/sdgs/UNSDGAPIV5"
-UNSD_V5_API  = f"{UNSD_V5_BASE}/v1/sdg"
+UNSD_V5_API = f"{UNSD_V5_BASE}/v1/sdg"
+
 # Legacy SDG API path (still commonly deployed)
 UNSD_V1_BASE = "https://unstats.un.org/SDGAPI"
-UNSD_V1_API  = f"{UNSD_V1_BASE}/v1/sdg"
+UNSD_V1_API = f"{UNSD_V1_BASE}/v1/sdg"
 
-# Disk cache directory (works on Streamlit Cloud during runtime; persisted per instance)
-CACHE_DIR = Path(".cache_sdg")
-CACHE_DIR.mkdir(exist_ok=True)
+# -----------------------------
+# ✅ STREAMLIT CLOUD SAFE WRITABLE DIRS (PATCH)
+# -----------------------------
+RUNTIME_DIR = Path(tempfile.gettempdir()) / "un_sdg_dashboard"
+RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+CACHE_DIR = RUNTIME_DIR / ".cache_sdg"
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 # -----------------------------
 # Robust helpers
@@ -94,12 +97,9 @@ def read_uploaded_table(uploaded_file) -> pd.DataFrame:
     raise ValueError("Unsupported file type. Upload CSV or Excel.")
 
 # -----------------------------
-# Disk cache helpers (NEW)
+# Disk cache helpers
 # -----------------------------
 def stable_key(payload: dict) -> str:
-    """
-    Stable hash key for caching based on parameters.
-    """
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24]
 
@@ -107,25 +107,29 @@ def cache_paths(key: str):
     return (CACHE_DIR / f"{key}.parquet", CACHE_DIR / f"{key}.csv", CACHE_DIR / f"{key}.json")
 
 def cache_read(key: str) -> pd.DataFrame | None:
-    p_parq, _, p_meta = cache_paths(key)
+    p_parq, _, _ = cache_paths(key)
     if p_parq.exists():
         try:
             return pd.read_parquet(p_parq)
         except Exception:
-            # Corrupt or missing engine
             return None
     return None
 
 def cache_write(key: str, df: pd.DataFrame, meta: dict):
     p_parq, p_csv, p_meta = cache_paths(key)
-    # Parquet (best), plus CSV as human-friendly
+    # Prefer parquet; always write CSV + meta
     try:
         df.to_parquet(p_parq, index=False)
     except Exception:
-        # If parquet not available, at least CSV
         pass
-    df.to_csv(p_csv, index=False)
-    p_meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    try:
+        df.to_csv(p_csv, index=False)
+    except Exception:
+        pass
+    try:
+        p_meta.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
 
 def list_cache_items(limit: int = 30):
     items = []
@@ -170,6 +174,7 @@ def try_get_first_json(paths: list[tuple[str, dict | None]]):
     raise last_err if last_err else RuntimeError("No endpoints succeeded.")
 
 def json_to_df(rows) -> pd.DataFrame:
+    # Flatten nested objects so filters/nunique won't crash
     return pd.json_normalize(rows, sep=".")
 
 # -----------------------------
@@ -177,78 +182,65 @@ def json_to_df(rows) -> pd.DataFrame:
 # -----------------------------
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_geoareas():
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/GeoArea/List", None),
         (f"{UNSD_V1_API}/GeoArea/List", None),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_goals():
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/Goal/List", None),
         (f"{UNSD_V1_API}/Goal/List", None),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_targets(goal_code: str):
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/Goal/{goal_code}/Target/List", None),
         (f"{UNSD_V1_API}/Goal/{goal_code}/Target/List", None),
         (f"{UNSD_V5_API}/Target/List", {"goalCode": goal_code}),
         (f"{UNSD_V1_API}/Target/List", {"goalCode": goal_code}),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_indicators_for_target(target_code: str):
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/Target/{target_code}/Indicator/List", None),
         (f"{UNSD_V1_API}/Target/{target_code}/Indicator/List", None),
         (f"{UNSD_V5_API}/Indicator/List", {"targetCode": target_code}),
         (f"{UNSD_V1_API}/Indicator/List", {"targetCode": target_code}),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_all_indicators():
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/Indicator/List", None),
         (f"{UNSD_V1_API}/Indicator/List", None),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 @st.cache_data(ttl=60 * 60, show_spinner=False)
 def fetch_series_for_indicator(indicator_code: str):
-    candidates = [
+    j = try_get_first_json([
         (f"{UNSD_V5_API}/Indicator/{indicator_code}/Series/List", None),
         (f"{UNSD_V1_API}/Indicator/{indicator_code}/Series/List", None),
         (f"{UNSD_V5_API}/Series/List", {"indicator": indicator_code}),
         (f"{UNSD_V1_API}/Series/List", {"indicator": indicator_code}),
-    ]
-    j = try_get_first_json(candidates)
-    rows = _rows_from_json(j)
-    return json_to_df(rows)
+    ])
+    return json_to_df(_rows_from_json(j))
 
 def _fetch_series_data_no_cache(series_code: str, area_codes: list[str], page_size: int = 10000):
     frames = []
     for ac in area_codes:
-        candidates = [
+        j = try_get_first_json([
             (f"{UNSD_V5_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
             (f"{UNSD_V1_API}/Series/Data", {"seriesCode": series_code, "areaCode": ac, "pageSize": page_size}),
-        ]
-        j = try_get_first_json(candidates)
+        ])
         rows = _rows_from_json(j)
         if not rows:
             continue
@@ -261,11 +253,10 @@ def _fetch_series_data_no_cache(series_code: str, area_codes: list[str], page_si
 def _fetch_indicator_data_no_cache(indicator_code: str, area_codes: list[str], page_size: int = 10000):
     frames = []
     for ac in area_codes:
-        candidates = [
+        j = try_get_first_json([
             (f"{UNSD_V5_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
             (f"{UNSD_V1_API}/Indicator/Data", {"indicator": indicator_code, "areaCode": ac, "pageSize": page_size}),
-        ]
-        j = try_get_first_json(candidates)
+        ])
         rows = _rows_from_json(j)
         if not rows:
             continue
@@ -339,7 +330,7 @@ def normalize_dataset(df: pd.DataFrame):
         maybe_val = [c for c in df2.columns if "value" in c.lower()]
         value_col_guess = maybe_val[0] if maybe_val else None
 
-    df2["__year"]  = _coerce_year(df2[year_col_guess]) if year_col_guess else np.nan
+    df2["__year"] = _coerce_year(df2[year_col_guess]) if year_col_guess else np.nan
     df2["__value"] = pd.to_numeric(df2[value_col_guess], errors="coerce") if value_col_guess else np.nan
     df2["__group"] = df2[area_name_guess].astype(str) if area_name_guess else (
         df2[area_code_guess].astype(str) if area_code_guess else "All"
@@ -359,6 +350,7 @@ def compute_kpis(df: pd.DataFrame, year_col: str, value_col: str, group_col: str
         sub = sub.sort_values(year_col)
         if sub.empty:
             continue
+
         latest = sub.iloc[-1]
         latest_year = latest[year_col]
         latest_val = latest[value_col]
@@ -396,18 +388,20 @@ def compute_kpis(df: pd.DataFrame, year_col: str, value_col: str, group_col: str
 # UI
 # -----------------------------
 st.title("UN Office for Partnerships — SDG Data Explorer + Finance Dashboard")
-st.caption("Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, render 10 chart types, and cache datasets to disk.")
+st.caption("Browse SDG catalog (Goal→Target→Indicator→Series), apply disaggregation filters, render 10 chart types, and cache datasets safely on Streamlit Cloud.")
 
 mode = st.sidebar.radio("Mode", ["Browse SDG Catalog", "Quick Indicator Fetch", "Upload CSV/XLSX"], index=0)
 
-# NEW: disk cache controls
+# Disk cache controls
 st.sidebar.subheader("Performance")
 disk_cache = st.sidebar.toggle("Enable disk cache (Parquet/CSV)", value=True)
+
 with st.sidebar.expander("Cache utilities"):
     if st.button("Clear disk cache"):
         clear_cache()
         st.success("Cache cleared.")
     items = list_cache_items(limit=15)
+    st.caption(f"Cache directory: {str(CACHE_DIR)}")
     if items:
         st.caption("Recent cached datasets")
         st.dataframe(pd.DataFrame(items), use_container_width=True, hide_index=True)
@@ -470,6 +464,7 @@ if mode == "Browse SDG Catalog":
 
     series_code = _pick_col(series, ["seriesCode", "series", "code"])
     series_desc = _pick_col(series, ["seriesDescription", "description", "name", "title"])
+
     if series_code is None:
         st.sidebar.warning("Series list not available for this indicator. Will use Indicator/Data.")
         chosen_series_code = None
@@ -538,7 +533,9 @@ elif mode == "Quick Indicator Fetch":
 
     if run and area_codes:
         with st.spinner("Fetching SDG observations..."):
-            df_raw, cache_key, cache_hit = fetch_indicator_data(chosen_ind_code, area_codes, page_size, disk_cache, label=ind_choice)
+            df_raw, cache_key, cache_hit = fetch_indicator_data(
+                chosen_ind_code, area_codes, page_size, disk_cache, label=ind_choice
+            )
             meta_note = f"Source: Indicator/Data | indicator={chosen_ind_code} | cache={'HIT' if cache_hit else 'MISS'} | key={cache_key}"
 
 else:
@@ -559,21 +556,28 @@ with st.expander("Diagnostics / Raw preview (optional)"):
     st.write(meta_note)
     st.dataframe(df_raw.head(200), use_container_width=True)
 
-# NEW: Export fetched raw (cached) dataset as CSV/Parquet downloads
+# -----------------------------
+# ✅ Export raw dataset (CSV + Parquet in-memory) (PATCH)
+# -----------------------------
 st.sidebar.subheader("Export")
-if not df_raw.empty:
-    st.sidebar.download_button("Download raw as CSV", df_raw.to_csv(index=False).encode("utf-8"),
-                               file_name="sdg_raw_export.csv", mime="text/csv")
-    try:
-        import pyarrow  # noqa: F401
-        raw_parq = df_raw.to_parquet(index=False)
-    except Exception:
-        raw_parq = None
-    if raw_parq is None:
-        st.sidebar.caption("Parquet export requires pyarrow; add it to requirements to enable.")
-    else:
-        st.sidebar.download_button("Download raw as Parquet", raw_parq,
-                                   file_name="sdg_raw_export.parquet", mime="application/octet-stream")
+st.sidebar.download_button(
+    "Download raw as CSV",
+    df_raw.to_csv(index=False).encode("utf-8"),
+    file_name="sdg_raw_export.csv",
+    mime="text/csv"
+)
+
+try:
+    buf = io.BytesIO()
+    df_raw.to_parquet(buf, index=False)
+    st.sidebar.download_button(
+        "Download raw as Parquet",
+        buf.getvalue(),
+        file_name="sdg_raw_export.parquet",
+        mime="application/octet-stream"
+    )
+except Exception:
+    st.sidebar.caption("Parquet export requires pyarrow (kept in requirements.txt).")
 
 # -----------------------------
 # Disaggregation filters from RAW (auto)
@@ -738,38 +742,6 @@ st.download_button(
 )
 
 st.caption(
-    "This app uses UNSDGAPIV5 (swagger) and falls back to legacy SDGAPI endpoints where needed. "
-    "Disk cache stores fetched datasets under .cache_sdg as Parquet/CSV for faster reloads."
+    "✅ Streamlit Cloud safe: cache writes to /tmp via tempfile.gettempdir(). "
+    "Disk cache stores fetched datasets under /tmp/un_sdg_dashboard/.cache_sdg as Parquet/CSV/JSON for faster reloads."
 )
-'''
-
-reqs = """streamlit>=1.32
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-plotly>=5.19
-openpyxl>=3.1
-python-dateutil>=2.9
-pyarrow>=15.0
-"""
-
-base = Path("/mnt/data/un_sdg_dashboard_v3")
-base.mkdir(parents=True, exist_ok=True)
-
-(app_path := base/"app.py").write_text(app_code, encoding="utf-8")
-(req_path := base/"requirements.txt").write_text(reqs, encoding="utf-8")
-
-# Include the mock dataset previously generated (if present)
-mock_src = Path("/mnt/data/un_mock_dataset.csv")
-if mock_src.exists():
-    (base/"un_mock_dataset.csv").write_bytes(mock_src.read_bytes())
-
-zip_path = Path("/mnt/data/un_sdg_dashboard_v3.zip")
-with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-    z.write(app_path, arcname="app.py")
-    z.write(req_path, arcname="requirements.txt")
-    if (base/"un_mock_dataset.csv").exists():
-        z.write(base/"un_mock_dataset.csv", arcname="un_mock_dataset.csv")
-
-str(zip_path), str(app_path), str(req_path), (base/"un_mock_dataset.csv").exists()
-
